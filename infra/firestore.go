@@ -2,16 +2,29 @@ package infra
 
 import (
 	"context"
-	"fmt"
+	"encoding/json"
+	"log"
 
 	"cloud.google.com/go/firestore"
 )
 
-// new client
 func NewClient(ctx context.Context, projectID string) (*firestore.Client, error) {
 	client, err := firestore.NewClient(ctx, projectID)
 	if err != nil {
-		return nil, fmt.Errorf("erro ao conectar no Firestore: %w", err)
+		return nil, err
 	}
 	return client, nil
+}
+
+func NewFirestoreHandler(ctx context.Context, collection *firestore.CollectionRef) func(msg []byte) {
+	return func(msg []byte) {
+		data := map[string]interface{}{}
+		if err := json.Unmarshal(msg, &data); err != nil {
+			log.Printf("Erro ao decodificar JSON: %v", err)
+			return
+		}
+		if _, _, err := collection.Add(ctx, data); err != nil {
+			log.Printf("Erro ao salvar no Firestore: %v", err)
+		}
+	}
 }

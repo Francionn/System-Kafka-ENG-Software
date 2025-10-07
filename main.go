@@ -5,23 +5,27 @@ import (
 	"log"
 
 	"kafka_system/consumer"
-	"kafka_system/producer"
+	"kafka_system/infra"
 )
 
 func main() {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := context.Background()
 
-	// -------- PRODUCER --------
-	prod, err := producer.NewProducer(ctx, "v1sensor", "my-topic-test", []string{"localhost:9094"})
+	fsClient, err := infra.NewClient(ctx, "v1sensor")
 	if err != nil {
-		log.Fatalf("Error: create producer: %v", err)
+		log.Fatalf("Erro Firestore: %v", err)
 	}
+	defer fsClient.Close()
 
-	// roda producer em paralelo
-	go prod.Run("sensores")
+	collection := fsClient.Collection("sensores")
 
-	// -------- CONSUMERS --------
-	brokers := []string{"localhost:9094", "localhost:9095", "localhost:9096"}
-	consumer.RunConsumers(ctx, "consumer-group-1", "my-topic-test", brokers, 4)
+	processMessage := infra.NewFirestoreHandler(ctx, collection)
+
+	brokers := []string{"localhost:9094"}
+	numWorkers := 4
+	bufferSize := 1000
+	topic := "my-topic-test-new"
+	groupID := "consumer-group-test"
+
+	consumer.RunConsumerWithHandler(ctx, groupID, topic, brokers, numWorkers, bufferSize, processMessage)
 }

@@ -3,86 +3,92 @@ package consumer
 import (
 	"context"
 	"log"
-	"sync"
+	"sync/atomic"
 
 	"github.com/IBM/sarama"
 )
 
 type ConsumerGroupHandler struct {
-	WorkerID int
+	Messages chan *sarama.ConsumerMessage
+	Counter  *uint64
 }
 
-// Setup é chamado no início da sessão
 func (h *ConsumerGroupHandler) Setup(sarama.ConsumerGroupSession) error {
-	log.Printf("[Worker-%d] Sessão iniciada", h.WorkerID)
+	log.Println("[Consumer] Session started")
 	return nil
 }
 
-// Cleanup é chamado no final da sessão
 func (h *ConsumerGroupHandler) Cleanup(sarama.ConsumerGroupSession) error {
-	log.Printf("[Worker-%d] Sessão finalizada", h.WorkerID)
+	log.Println("[Consumer] Session finished")
 	return nil
 }
 
-// ConsumeClaim é chamado para cada partição atribuída
 func (h *ConsumerGroupHandler) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
 	for msg := range claim.Messages() {
-		log.Printf("[Worker-%d] Mensagem recebida:", h.WorkerID)
-		log.Printf("   Tópico: %s", msg.Topic)
-		log.Printf("   Partição: %d", msg.Partition)
-		log.Printf("   Offset: %d", msg.Offset)
-		log.Printf("   Key: %s", string(msg.Key))
-		log.Printf("   Value: %s", string(msg.Value))
-
+		h.Messages <- msg
 		session.MarkMessage(msg, "")
 	}
 	return nil
 }
 
-// RunConsumers cria múltiplos consumers em paralelo dentro do mesmo consumer group
-func RunConsumers(ctx context.Context, groupID, topic string, brokers []string, numWorkers int) {
-	var wg sync.WaitGroup
+func RunConsumerWithHandler(
+	ctx context.Context,
+	groupID, topic string,
+	brokers []string,
+	numWorkers int,
+	bufferSize int,
+	processMessage func(msg []byte),
+) {
+	config := sarama.NewConfig()
+	config.Version = sarama.MaxVersion
+	config.Consumer.Return.Errors = true
+	config.Consumer.Group.Rebalance.Strategy = sarama.NewBalanceStrategyRange()
+	config.Consumer.Offsets.Initial = sarama.OffsetNewest
 
-	for i := 0; i < numWorkers; i++ {
-		wg.Add(1)
+	consumerGroup, err := sarama.NewConsumerGroup(brokers, groupID, config)
+	if err != nil {
+		log.Fatalf("Error create consumer group: %v", err)
+	}
+	defer consumerGroup.Close()
 
+	messages := make(chan *sarama.ConsumerMessage, bufferSize)
+
+	var counter uint64
+
+	// Worker pool
+	for w := 0; w < numWorkers; w++ {
 		go func(workerID int) {
-			defer wg.Done()
+			for msg := range messages {
+				atomic.AddUint64(&counter, 1)
+				current := atomic.LoadUint64(&counter)
 
-			config := sarama.NewConfig()
-			config.Version = sarama.MaxVersion
-			config.Consumer.Return.Errors = true
-			config.Consumer.Group.Rebalance.Strategy = sarama.NewBalanceStrategyRange()
-			config.Consumer.Offsets.Initial = sarama.OffsetOldest
+				processMessage(msg.Value)
 
-			consumerGroup, err := sarama.NewConsumerGroup(brokers, groupID, config)
-			if err != nil {
-				log.Fatalf("[Worker-%d] Erro criando consumer group: %v", workerID, err)
+				log.Printf("[Worker-%d] Topic: %s | Partition: %d | Offset: %d | Total messages processed: %d",
+					workerID, msg.Topic, msg.Partition, msg.Offset, current)
 			}
-			defer consumerGroup.Close()
-
-			// Goroutine para capturar erros
-			go func() {
-				for err := range consumerGroup.Errors() {
-					log.Printf("[Worker-%d] Erro no consumer: %v", workerID, err)
-				}
-			}()
-
-			handler := &ConsumerGroupHandler{WorkerID: workerID}
-
-			for {
-				log.Printf("[Worker-%d] Iniciando consumo no tópico %s...", workerID, topic)
-				if err := consumerGroup.Consume(ctx, []string{topic}, handler); err != nil {
-					log.Printf("[Worker-%d] Erro consumindo mensagens: %v", workerID, err)
-				}
-
-				if ctx.Err() != nil {
-					log.Printf("[Worker-%d] Contexto cancelado, encerrando...", workerID)
-					return
-				}
-			}
-		}(i)
+		}(w)
 	}
 
-	wg.Wait()
+	go func() {
+		for err := range consumerGroup.Errors() {
+			log.Printf("[Consumer] Error: %v", err)
+		}
+	}()
+
+	handler := &ConsumerGroupHandler{
+		Messages: messages,
+		Counter:  &counter,
+	}
+
+	for {
+		if err := consumerGroup.Consume(ctx, []string{topic}, handler); err != nil {
+			log.Printf("[Consumer] Errot at consumation: %v", err)
+		}
+		if ctx.Err() != nil {
+			log.Println("[Consumer] Context cancel")
+			close(messages)
+			return
+		}
+	}
 }

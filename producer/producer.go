@@ -1,3 +1,5 @@
+// Não faz parte do sistema no momento
+
 package producer
 
 import (
@@ -49,7 +51,7 @@ func (p *Producer) Run(collection string) {
 	for {
 		snap, err := snapshots.Next()
 		if err != nil {
-			log.Printf("Erro no snapshot: %v", err)
+			log.Printf("Error in snapshot: %v", err)
 			continue
 		}
 
@@ -59,13 +61,11 @@ func (p *Producer) Run(collection string) {
 			continue
 		}
 
-		// case: data not found"
 		if len(snap.Changes) == 0 {
 			p.sendMessage("none")
 			continue
 		}
 
-		// changes process
 		for _, change := range snap.Changes {
 			if change.Kind == firestore.DocumentAdded || change.Kind == firestore.DocumentModified {
 				value := fmt.Sprintf("%v", change.Doc.Data())
@@ -75,15 +75,14 @@ func (p *Producer) Run(collection string) {
 	}
 }
 
-// send message to Kafka
 func (p *Producer) sendMessage(msg string) {
 	err := p.writer.WriteMessages(p.ctx, kafka.Message{
 		Value: []byte(msg),
 	})
 	if err != nil {
-		log.Printf("Erro ao enviar mensagem: %v", err)
+		log.Printf("Error send message: %v", err)
 	} else {
-		fmt.Println("Enviado:", msg)
+		fmt.Println("send:", msg)
 	}
 }
 
