@@ -2,43 +2,29 @@ package consumer
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"sync/atomic"
+	"time"
 
+	"cloud.google.com/go/firestore"
 	"github.com/IBM/sarama"
 )
 
-type ConsumerGroupHandler struct {
-	Messages chan *sarama.ConsumerMessage
-	Counter  *uint64
-}
-
-func (h *ConsumerGroupHandler) Setup(sarama.ConsumerGroupSession) error {
-	log.Println("[Consumer] Session started")
-	return nil
-}
-
-func (h *ConsumerGroupHandler) Cleanup(sarama.ConsumerGroupSession) error {
-	log.Println("[Consumer] Session finished")
-	return nil
-}
-
-func (h *ConsumerGroupHandler) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
-	for msg := range claim.Messages() {
-		h.Messages <- msg
-		session.MarkMessage(msg, "")
-	}
-	return nil
-}
-
 func RunConsumerWithHandler(
 	ctx context.Context,
-	groupID, topic string,
+	groupID string,
+	topic string,
 	brokers []string,
 	numWorkers int,
 	bufferSize int,
 	processMessage func(msg []byte),
+	firestoreClient *firestore.Client,
+	firestoreCollection string,
 ) {
+	// =========================
+	// Kafka config
+	// =========================
 	config := sarama.NewConfig()
 	config.Version = sarama.MaxVersion
 	config.Consumer.Return.Errors = true
@@ -47,48 +33,107 @@ func RunConsumerWithHandler(
 
 	consumerGroup, err := sarama.NewConsumerGroup(brokers, groupID, config)
 	if err != nil {
-		log.Fatalf("Error create consumer group: %v", err)
+		log.Fatalf("Error creating consumer group: %v", err)
 	}
 	defer consumerGroup.Close()
 
+	// =========================
+	// Infra
+	// =========================
 	messages := make(chan *sarama.ConsumerMessage, bufferSize)
-
 	var counter uint64
+	collection := firestoreClient.Collection(firestoreCollection)
 
+	// =========================
 	// Worker pool
+	// =========================
 	for w := 0; w < numWorkers; w++ {
 		go func(workerID int) {
 			for msg := range messages {
 				atomic.AddUint64(&counter, 1)
 				current := atomic.LoadUint64(&counter)
 
+				// Continua usando o processor (API, logs, etc.)
 				processMessage(msg.Value)
 
-				log.Printf("[Worker-%d] Topic: %s | Partition: %d | Offset: %d | Total messages processed: %d",
-					workerID, msg.Topic, msg.Partition, msg.Offset, current)
+				// =========================
+				// Processa e salva no Firestore
+				// =========================
+				func(data []byte) {
+					var sensorData SensorData
+
+					// Decode JSON do Kafka
+					if err := json.Unmarshal(data, &sensorData); err != nil {
+						log.Printf("[Worker-%d] JSON unmarshal error: %v", workerID, err)
+						return
+					}
+
+					// Calcula Status e QIA (segurança caso processor não seja usado)
+					sensorData.Status = analyzeSensorStatus(&sensorData)
+					sensorData.QIA = CalculateQIA(&sensorData)
+
+					// Timestamp real
+					ts := time.Time(sensorData.Timestamp)
+
+					// Documento Firestore
+					doc := map[string]interface{}{
+						// Dados do sensor
+						"sensorID":      sensorData.SensorID,
+						"name":          sensorData.Name,
+						"latitude":      sensorData.Latitude,
+						"longitude":     sensorData.Longitude,
+						"temperature":   sensorData.Temperature,
+						"humidity":      sensorData.Humidity,
+						"co2":           sensorData.CO2,
+						"pm25":          sensorData.PM25,
+						"pm10":          sensorData.PM10,
+						"windDirection": sensorData.WindDirection,
+						"status":        sensorData.Status,
+						"qia":           sensorData.QIA,
+
+						// Timestamp nativo Firestore
+						"timestamp": ts,
+
+						// 🔥 Otimização para dashboard
+						"year":  ts.Year(),
+						"month": int(ts.Month()),
+						"day":   ts.Day(),
+
+						// Metadados Kafka (opcional)
+						"topic":     msg.Topic,
+						"partition": msg.Partition,
+						"offset":    msg.Offset,
+					}
+
+					if _, _, err := collection.Add(ctx, doc); err != nil {
+						log.Printf("[Worker-%d] Firestore error: %v", workerID, err)
+					}
+				}(msg.Value)
+
+				log.Printf(
+					"[Worker-%d] Topic: %s | Partition: %d | Offset: %d | Total processed: %d",
+					workerID,
+					msg.Topic,
+					msg.Partition,
+					msg.Offset,
+					current,
+				)
 			}
 		}(w)
 	}
 
-	go func() {
-		for err := range consumerGroup.Errors() {
-			log.Printf("[Consumer] Error: %v", err)
-		}
-	}()
-
-	handler := &ConsumerGroupHandler{
-		Messages: messages,
-		Counter:  &counter,
-	}
+	// =========================
+	// Consumer handler
+	// =========================
+	handler := &ConsumerGroupHandler{Messages: messages}
 
 	for {
 		if err := consumerGroup.Consume(ctx, []string{topic}, handler); err != nil {
-			log.Printf("[Consumer] Errot at consumation: %v", err)
+			log.Printf("Error during consumption: %v", err)
 		}
 		if ctx.Err() != nil {
-			log.Println("[Consumer] Context cancel")
-			close(messages)
-			return
+			log.Println("Context cancelled, stopping consumer...")
+			break
 		}
 	}
 }

@@ -20,11 +20,11 @@ func NewFirestoreHandler(ctx context.Context, collection *firestore.CollectionRe
 	return func(msg []byte) {
 		data := map[string]interface{}{}
 		if err := json.Unmarshal(msg, &data); err != nil {
-			log.Printf("Erro ao decodificar JSON: %v", err)
+			log.Printf("Error when decoding JSON: %v", err)
 			return
 		}
 		if _, _, err := collection.Add(ctx, data); err != nil {
-			log.Printf("Erro ao salvar no Firestore: %v", err)
+			log.Printf("Error saving to Firestore: %v", err)
 		}
 	}
 }
