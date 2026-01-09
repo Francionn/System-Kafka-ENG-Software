@@ -29,7 +29,7 @@ E coloque **na raiz do projeto** (mesmo nível do `docker-compose.yml`).
 No terminal, dentro da raiz do projeto:
 
 ```bash
-export GOOGLE_APPLICATION_CREDENTIALS=$(pwd)/v1sensor-b8cd9b8b9de3.json
+export GOOGLE_APPLICATION_CREDENTIALS=$(pwd)/v1sensor-firebase.json
 ```
 
 > Esse export é necessário para o Go conseguir acessar a Cloud.
